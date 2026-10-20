@@ -1,24 +1,15 @@
 {
-  "name": "scarzbots",
+  "name": "scarzbots-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "ScarzBots Backend Server for Render",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
-  "keywords": [
-    "agar.io",
-    "scarzbots",
-    "bystorm"
-  ],
-  "author": "Storm",
-  "license": "MIT",
   "dependencies": {
-    "boxen": "^8.0.1",
-    "chalk": "^5.4.1",
-    "https-proxy-agent": "^7.0.6",
-    "socks-proxy-agent": "^8.0.5",
-    "ws": "^8.18.0"
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
