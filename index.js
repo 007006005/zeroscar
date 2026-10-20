@@ -1,62 +1,83 @@
 const http = require('http');
 const WebSocket = require('ws');
-const fs = require('fs');
 
-// Configurazione server con porta 80
-const PORT = process.env.PORT || 80;
-const serverUrl = "wss://legend.master-elettroerosioni.it";
-const apiUrl = "https://legend.master-elettroerosioni.it/api";
+const PORT = process.env.PORT || 10000;
 
-// Stampa Banner ScarzBots
-console.log(`
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ScarzBots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                    ┃
-┃    Name: ScarzBots                                                 ┃
-┃    YT: @scarzcn                                                    ┃
-┃    Version: 1.0                                                    ┃
-┃    Developed: By Storm, Search on YT: @Storm1464 and suscribe        ┃
-┃    Social Media:  > https://www.youtube.com/@scarzcn               ┃
-┃                 > https://www.instagram.com/scarzcn                ┃
-┃                 > https://discord.com/invite/TvHycpKtKr            ┃
-┃                                                                    ┃
-┃                                                                    ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-`);
+// Stato della configurazione globale condivisa
+let currentConfig = {
+    botName: 'XEVBOTS',
+    botCount: 10,
+    agarServer: 'wss://srv-dbbragrrjlhs73evl6bg',
+    targetPlayerName: '',
+    botAi: false,
+    vShield: false,
+    freezeBots: false,
+    patrolMode: false,
+    isRunning: false
+};
 
-// Gestione proxies.txt con fallback se assente
-let proxies = [];
-try {
-    if (fs.existsSync('proxies.txt')) {
-        proxies = fs.readFileSync('proxies.txt', 'utf8').split('\n').filter(Boolean);
-        console.log(`[INFO]-Loaded ${proxies.length} proxies from proxies.txt.`);
-    } else {
-        console.log(`[INFO]-No proxies.txt found, running without proxies.`);
-    }
-} catch (err) {
-    console.log(`[INFO]-Error reading proxies.txt: ${err.message}`);
-}
-
-// Creazione server HTTP & WebSocket
 const server = http.createServer((req, res) => {
-    if (req.url === '/api' || req.url.startsWith('/api/')) {
+    // Abilita CORS per permettere allo script Tampermonkey di leggere/scrivere
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+
+    // Endpoint per leggere la configurazione
+    if (req.url === '/api/config' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'online', server: serverUrl, api: apiUrl }));
+        res.end(JSON.stringify(currentConfig));
+    } 
+    // Endpoint per aggiornare la configurazione (es. da un pannello o script)
+    else if (req.url === '/api/config' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            try {
+                const data = JSON.parse(body);
+                currentConfig = { ...currentConfig, ...data };
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ status: 'success', config: currentConfig }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ status: 'error', message: 'Invalid JSON' }));
+            }
+        });
     } else {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('ScarzBots Server Running on legend.master-elettroerosioni.it');
+        res.end('ScarzBots Render Backend Running');
     }
 });
 
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
-    console.log('[INFO]-Client connected via WebSocket');
+    console.log('[INFO] - Nuovo client connesso via WebSocket');
+    
+    // Invia lo stato corrente appena si connette
+    ws.send(JSON.stringify({ type: 'config', config: currentConfig }));
+
     ws.on('message', (message) => {
-        ws.send(JSON.stringify({ status: 'ack', received: message.toString() }));
+        try {
+            const data = JSON.parse(message);
+            if (data.action === 'update_config') {
+                currentConfig = { ...currentConfig, ...data.config };
+                // Broadcast a tutti i client connessi
+                wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({ type: 'config', config: currentConfig }));
+                    }
+                });
+            }
+        } catch (e) {}
     });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[INFO]-Running on port ${PORT}`);
-    console.log(`[INFO]-Target Domain: legend.master-elettroerosioni.it`);
+    console.log(`[INFO] - Server avviato sulla porta ${PORT}`);
 });
