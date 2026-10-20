@@ -2,45 +2,51 @@ const http = require('http');
 const WebSocket = require('ws');
 const fs = require('fs');
 
-// Render assegna dinamicamente process.env.PORT (es. 10000). Usa 3000 come fallback locale.
-const PORT = process.env.PORT || 3000;
+// Configurazione server con porta 80
+const PORT = process.env.PORT || 80;
 const serverUrl = "wss://legend.master-elettroerosioni.it";
 const apiUrl = "https://legend.master-elettroerosioni.it/api";
 
+// Stampa Banner ScarzBots
 console.log(`
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ScarzBots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃                                                                    ┃
 ┃    Name: ScarzBots                                                 ┃
+┃    YT: @scarzcn                                                    ┃
 ┃    Version: 1.0                                                    ┃
+┃    Developed: By Storm, Search on YT: @Storm1464 and suscribe        ┃
+┃    Social Media:  > https://www.youtube.com/@scarzcn               ┃
+┃                 > https://www.instagram.com/scarzcn                ┃
+┃                 > https://discord.com/invite/TvHycpKtKr            ┃
+┃                                                                    ┃
 ┃                                                                    ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 `);
 
-// Gestione proxies.txt opzionale
+// Gestione proxies.txt con fallback se assente
 let proxies = [];
 try {
     if (fs.existsSync('proxies.txt')) {
         proxies = fs.readFileSync('proxies.txt', 'utf8').split('\n').filter(Boolean);
         console.log(`[INFO]-Loaded ${proxies.length} proxies from proxies.txt.`);
     } else {
-        console.log(`[INFO]-No proxies.txt found, running in direct connection mode.`);
+        console.log(`[INFO]-No proxies.txt found, running without proxies.`);
     }
 } catch (err) {
-    console.log(`[INFO]-Notice reading proxies.txt: ${err.message}`);
+    console.log(`[INFO]-Error reading proxies.txt: ${err.message}`);
 }
 
-// Creazione server HTTP
+// Creazione server HTTP & WebSocket
 const server = http.createServer((req, res) => {
     if (req.url === '/api' || req.url.startsWith('/api/')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'online', server: serverUrl, api: apiUrl }));
     } else {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('ScarzBots Server Running');
+        res.end('ScarzBots Server Running on legend.master-elettroerosioni.it');
     }
 });
 
-// Istanza WebSocket legata allo stesso server HTTP
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
@@ -50,7 +56,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// ASCOLTO SULLA PORTA DINAMICA E SULL'INTERFACCIA 0.0.0.0
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[INFO]-Server successfully bound and listening on port ${PORT}`);
+    console.log(`[INFO]-Running on port ${PORT}`);
+    console.log(`[INFO]-Target Domain: legend.master-elettroerosioni.it`);
 });
