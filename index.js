@@ -1,11 +1,11 @@
 const http = require('http');
 const WebSocket = require('ws');
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 80;
 
 // Stato della configurazione globale condivisa
 let currentConfig = {
-    botName: 'XEVBOTS',
+    botName: 'Zero',
     botCount: 10,
     agarServer: 'wss://srv-dbbragrrjlhs73evl6bg',
     targetPlayerName: '',
