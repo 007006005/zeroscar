@@ -13,7 +13,7 @@ const config = {
     scrape: false,
     timeout: 7000,
     protocol: "http",
-    enableProxy: true,
+    enableProxy: false,
   },
 };
 
