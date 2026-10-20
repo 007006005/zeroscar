@@ -1,11 +1,12 @@
 const http = require('http');
 const WebSocket = require('ws');
 
+// Configurazione della porta 80 (con fallback su process.env.PORT per il cloud)
 const PORT = process.env.PORT || 80;
 
 // Stato della configurazione globale condivisa
 let currentConfig = {
-    botName: 'Zero',
+    botName: 'XEVBOTS',
     botCount: 10,
     agarServer: 'wss://srv-dbbragrrjlhs73evl6bg',
     targetPlayerName: '',
@@ -16,8 +17,21 @@ let currentConfig = {
     isRunning: false
 };
 
+// Stampa Banner ScarzBots
+console.log(`
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ScarzBots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                    ┃
+┃    Name: ScarzBots                                                 ┃
+┃    YT: @scarzcn                                                    ┃
+┃    Version: 1.0                                                    ┃
+┃    Port: ${PORT}                                                   ┃
+┃    Developed: By Storm, Search on YT: @Storm1464                   ┃
+┃                                                                    ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+`);
+
+// Creazione server HTTP con supporto API e CORS
 const server = http.createServer((req, res) => {
-    // Abilita CORS per permettere allo script Tampermonkey di leggere/scrivere
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -28,12 +42,12 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // Endpoint per leggere la configurazione
+    // Endpoint per leggere la configurazione e lo stato Start/Stop
     if (req.url === '/api/config' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(currentConfig));
     } 
-    // Endpoint per aggiornare la configurazione (es. da un pannello o script)
+    // Endpoint per aggiornare la configurazione
     else if (req.url === '/api/config' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => { body += chunk; });
@@ -50,16 +64,14 @@ const server = http.createServer((req, res) => {
         });
     } else {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('ScarzBots Render Backend Running');
+        res.end('ScarzBots Backend Running on Port ' + PORT);
     }
 });
 
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
-    console.log('[INFO] - Nuovo client connesso via WebSocket');
-    
-    // Invia lo stato corrente appena si connette
+    console.log('[INFO] - Client WebSocket connesso');
     ws.send(JSON.stringify({ type: 'config', config: currentConfig }));
 
     ws.on('message', (message) => {
@@ -67,7 +79,6 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
             if (data.action === 'update_config') {
                 currentConfig = { ...currentConfig, ...data.config };
-                // Broadcast a tutti i client connessi
                 wss.clients.forEach(client => {
                     if (client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({ type: 'config', config: currentConfig }));
@@ -79,5 +90,5 @@ wss.on('connection', (ws) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[INFO] - Server avviato sulla porta ${PORT}`);
+    console.log(`[INFO] - Server in esecuzione con successo sulla porta ${PORT}`);
 });
