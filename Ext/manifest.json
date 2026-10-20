@@ -1,0 +1,57 @@
+{
+    "manifest_version": 3,
+    "name": "SacarzBots",
+    "version": "1.0.0",
+    "description": "ScarzBots is a helper for agar.io, created, supervised, and developed by Storm",
+    "permissions": [
+        "cookies",
+        "activeTab",
+        "scripting",
+        "storage",
+        "tabs"
+    ],
+    "host_permissions": [
+        "*://www.facebook.com/*",
+        "*://facebook.com/*",
+        "*://deltav4.gitlab.io/*",
+        "*://agar.io/*",
+        "*://www.agar.io/*"
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "*://agar.io/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "run_at": "document_start",
+            "all_frames": true
+        }
+    ],
+    "icons": {
+        "128": "icons/icon128.png"
+    },
+    "action": {
+        "default_popup": "popup.html"
+    },
+    "background": {
+        "service_worker": "js/back.js"
+    },
+    "content_security_policy": {
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+        "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-inline' * blob: data:;"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "icons/*",
+                "js/*"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "use_dynamic_url": true
+        }
+    ]
+}

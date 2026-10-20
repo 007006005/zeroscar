@@ -1,0 +1,1647 @@
+// ==UserScript==
+// @name         Zero The Legend & ZeroExtens PRO -ccccc
+// @version      4.3
+// @description  Unified Agar.io bot spawner con effetti sonori, 5 nuove funzionalità avanzate e nuovo stile UI.
+// @icon         https://master-elettroerosioni.it/favicon.ico
+// @match        *://agar.io/*
+// @match        *://www.agar.io/*
+// @match        *://delt.io/*
+// @match        *://*.delt.io/*
+// @match        *://deltav4.gitlab.io/*
+// @run-at       document-end
+// @noframes
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    if (window.__scarzBotsLoaded) return;
+    window.__scarzBotsLoaded = true;
+
+    const SERVER_RE = /wss:\/\/([\w.-]+\/[\w-]+\/[\d-]+)/;
+
+    const storage = {
+        get(key, fallback = null) {
+            try {
+                const v = localStorage.getItem(key);
+                return v === null ? fallback : v;
+            } catch (e) { return fallback; }
+        },
+        set(key, value) {
+            try { localStorage.setItem(key, value); } catch (e) {}
+        }
+    };
+
+    // --- SINTETIZZATORE AUDIO (Web Audio API per effetti sonori Start/Stop) ---
+    const SoundFX = {
+        ctx: null,
+        init() {
+            if (!this.ctx) {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (AudioCtx) this.ctx = new AudioCtx();
+            }
+            if (this.ctx && this.ctx.state === 'suspended') {
+                this.ctx.resume();
+            }
+        },
+        playStart() {
+            try {
+                this.init();
+                if (!this.ctx) return;
+                const now = this.ctx.currentTime;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(261.63, now); // C4
+                osc.frequency.exponentialRampToValueAtTime(523.25, now + 0.15); // C5
+                osc.frequency.exponentialRampToValueAtTime(1046.50, now + 0.3); // C6
+                gain.gain.setValueAtTime(0.15, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start(now);
+                osc.stop(now + 0.35);
+            } catch (e) {}
+        },
+        playStop() {
+            try {
+                this.init();
+                if (!this.ctx) return;
+                const now = this.ctx.currentTime;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(523.25, now); // C5
+                osc.frequency.exponentialRampToValueAtTime(261.63, now + 0.15); // C4
+                osc.frequency.exponentialRampToValueAtTime(130.81, now + 0.3); // C3
+                gain.gain.setValueAtTime(0.15, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start(now);
+                osc.stop(now + 0.35);
+            } catch (e) {}
+        }
+    };
+
+    class Entity {
+        constructor() {
+            this.id = 0;
+            this.x = 0;
+            this.y = 0;
+            this.size = 0;
+            this.name = "";
+            this.isVirus = false;
+            this.isPellet = false;
+            this.isFriend = false;
+        }
+    }
+
+    class Reader {
+        constructor(buffer) {
+            this.dataView = new DataView(buffer);
+            this.byteOffset = 0;
+            this.bufferLength = buffer.byteLength;
+        }
+        remaining() { return this.bufferLength - this.byteOffset; }
+        hasMore() { return this.byteOffset < this.bufferLength; }
+        readUint8() {
+            if (this.remaining() < 1) return 0;
+            return this.dataView.getUint8(this.byteOffset++);
+        }
+        readUint16() {
+            if (this.remaining() < 2) return 0;
+            const v = this.dataView.getUint16(this.byteOffset, true);
+            this.byteOffset += 2;
+            return v;
+        }
+        readInt32() {
+            if (this.remaining() < 4) return 0;
+            const v = this.dataView.getInt32(this.byteOffset, true);
+            this.byteOffset += 4;
+            return v;
+        }
+        readUint32() {
+            if (this.remaining() < 4) return 0;
+            const v = this.dataView.getUint32(this.byteOffset, true);
+            this.byteOffset += 4;
+            return v;
+        }
+        readFloat64() {
+            if (this.remaining() < 8) return 0;
+            const v = this.dataView.getFloat64(this.byteOffset, true);
+            this.byteOffset += 8;
+            return v;
+        }
+        readString() {
+            let result = "";
+            while (this.byteOffset < this.bufferLength) {
+                const c = this.dataView.getUint8(this.byteOffset++);
+                if (c === 0) break;
+                result += String.fromCharCode(c);
+            }
+            return result;
+        }
+        readUTF8String() {
+            const bytes = [];
+            while (this.byteOffset < this.bufferLength) {
+                const b = this.dataView.getUint8(this.byteOffset++);
+                if (b === 0) break;
+                bytes.push(b);
+            }
+            return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+        }
+    }
+
+    class Writer {
+        constructor(size) {
+            this.dataView = new DataView(new ArrayBuffer(size || 1000));
+            this.byteOffset = 0;
+        }
+        ensureCapacity(extra) {
+            let cap = this.dataView.buffer.byteLength;
+            if (this.byteOffset + extra <= cap) return;
+            while (this.byteOffset + extra > cap) cap *= 2;
+            const grown = new ArrayBuffer(cap);
+            new Uint8Array(grown).set(new Uint8Array(this.dataView.buffer));
+            this.dataView = new DataView(grown);
+        }
+        writeUint8(v) { this.ensureCapacity(1); this.dataView.setUint8(this.byteOffset++, v); }
+        writeInt32(v) { this.ensureCapacity(4); this.dataView.setInt32(this.byteOffset, v, true); this.byteOffset += 4; }
+        writeUint32(v) { this.ensureCapacity(4); this.dataView.setUint32(this.byteOffset, v, true); this.byteOffset += 4; }
+        writeUTF8String(str) {
+            const bytes = new TextEncoder().encode(str);
+            this.ensureCapacity(bytes.length + 1);
+            for (let i = 0; i < bytes.length; i++) this.dataView.setUint8(this.byteOffset++, bytes[i]);
+            this.dataView.setUint8(this.byteOffset++, 0);
+        }
+        toBuffer() { return this.dataView.buffer.slice(0, this.byteOffset); }
+    }
+
+    const diag = { closes: {}, recycled: {}, resets: 0, op85: 0, deaths: 0 };
+    const stormGuard = { recent: [], episodes: [], cooldownUntil: 0 };
+
+    function noteCloseForStorm() {
+        const now = Date.now();
+        stormGuard.recent.push(now);
+        while (stormGuard.recent.length && now - stormGuard.recent[0] > 1000) stormGuard.recent.shift();
+        const total = Math.max(bots.length, 1);
+        const threshold = Math.max(15, Math.ceil(total * 0.4));
+        if (stormGuard.recent.length >= threshold) {
+            const lastEpisode = stormGuard.episodes[stormGuard.episodes.length - 1];
+            if (!lastEpisode || now - lastEpisode > 1500) stormGuard.episodes.push(now);
+        }
+        while (stormGuard.episodes.length && now - stormGuard.episodes[0] > 20000) stormGuard.episodes.shift();
+        if (stormGuard.episodes.length >= 2) stormGuard.cooldownUntil = now + 8000;
+    }
+
+    const connector = {
+        queue: [],
+        active: new Set(),
+        timer: null,
+        spacing: 50,
+        maxInflight: 3,
+        enqueue(bot) {
+            if (bot.queued) return;
+            bot.queued = true;
+            this.queue.push(bot);
+            if (!this.timer) this.timer = setInterval(() => this.tick(), this.spacing);
+        },
+        release(bot) {
+            this.active.delete(bot);
+        },
+        remove(bot) {
+            this.active.delete(bot);
+            if (!bot.queued) return;
+            bot.queued = false;
+            const i = this.queue.indexOf(bot);
+            if (i !== -1) this.queue.splice(i, 1);
+        },
+        tick() {
+            for (const b of this.active) {
+                if (!b.ws || b.ws.readyState !== 0) this.active.delete(b);
+            }
+            if (this.active.size >= this.maxInflight) return;
+            const bot = this.queue.shift();
+            if (!bot) {
+                clearInterval(this.timer);
+                this.timer = null;
+                return;
+            }
+            bot.queued = false;
+            this.active.add(bot);
+            try { bot.open(); } catch (e) { this.active.delete(bot); }
+        }
+    };
+
+    class Bot {
+        constructor(config, customName = null, index = 0) {
+            this.config = config;
+            this.ws = null;
+            this.serverUrl = null;
+            this.stopped = false;
+            this.queued = false;
+            this.connected = false;
+            this.isAlive = false;
+            this.moveInt = null;
+            this.connectTimeout = null;
+            this.errorTimeout = null;
+            this.reconnectTimeout = null;
+            this.respawnTimeout = null;
+            this.isReconnecting = false;
+            this.connectionAttempts = 0;
+            this.reconnectBase = 400;
+            this.reconnectStep = 400;
+            this.reconnectMax = 3000;
+            this.connectionTimeout = 12000;
+            this.handshakeTimeout = 15000;
+            this.spawnRetry = 3000;
+            this.stallTimeout = 25000;
+            this.clientVersion = 31116;
+            this.protocolVersion = 23;
+            this.biggerPlayerAvoidanceRange = 1.15;
+            this.avoidanceDistance = 1;
+            this.name = customName || storage.get("gx-bot-tag") || "Zero The Legend";
+            this.index = index;
+            this.resetState();
+            this.requestConnect();
+        }
+
+        resetState() {
+            this.stopMoveLoop();
+            this.isAlive = false;
+            this.connected = false;
+            this.spawnReady = false;
+            this.spawnTries = 0;
+            this.lastSpawnAt = 0;
+            this.lastMessageAt = Date.now();
+            this.stateSince = Date.now();
+            this.offsetX = 0;
+            this.offsetY = 0;
+            this.cells = new Map();
+            this.pellets = new Map();
+            this.pelletCache = null;
+            this.ownSet = new Set();
+            this.myCellIDs = [];
+            this.encryptionKey = 0;
+            this.decryptionKey = 0;
+            this.serverVersion = null;
+            this.followMouse = this.config.botAi ? false : !this.config.vShield;
+            this.fleeing = false;
+        }
+
+        clearTimers() {
+            for (const k of ["connectTimeout", "errorTimeout", "reconnectTimeout", "respawnTimeout"]) {
+                if (this[k]) { clearTimeout(this[k]); this[k] = null; }
+            }
+            this.isReconnecting = false;
+        }
+
+        detachSocket() {
+            connector.release(this);
+            const ws = this.ws;
+            this.ws = null;
+            if (ws) {
+                ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
+                try { ws.close(); } catch (e) {}
+            }
+        }
+
+        requestConnect() {
+            this.clearTimers();
+            connector.remove(this);
+            this.detachSocket();
+            this.resetState();
+            if (this.stopped || !this.config.startedBots) return;
+            connector.enqueue(this);
+        }
+
+        open() {
+            if (this.stopped || !this.config.startedBots) { connector.release(this); return; }
+            if (!this.config.agarServer) { connector.release(this); this.scheduleReconnect(); return; }
+            try {
+                this.serverUrl = this.config.agarServer;
+                const ws = new WebSocket(this.serverUrl);
+                ws.__scarz = true;
+                ws.binaryType = "arraybuffer";
+                ws.onopen = () => this.onopen(ws);
+                ws.onclose = (ev) => this.onclose(ws, ev);
+                ws.onerror = () => this.onerror(ws);
+                ws.onmessage = (e) => this.onmessage(ws, e);
+                this.ws = ws;
+                this.stateSince = Date.now();
+                this.connectionAttempts++;
+                this.connectTimeout = setTimeout(() => {
+                    if (ws.readyState === WebSocket.CONNECTING) { try { ws.close(); } catch (e) {} }
+                }, this.connectionTimeout);
+            } catch (e) {
+                connector.release(this);
+                this.scheduleReconnect();
+            }
+        }
+
+        scheduleReconnect() {
+            if (this.stopped || !this.config.startedBots || this.isReconnecting) return;
+            this.isReconnecting = true;
+            let delay = Math.min(this.reconnectBase + this.connectionAttempts * this.reconnectStep, this.reconnectMax) + Math.random() * 600;
+            const now = Date.now();
+            if (now < stormGuard.cooldownUntil) {
+                delay += Math.min(stormGuard.cooldownUntil - now, 8000) * 0.5 + Math.random() * 1500;
+            }
+            this.reconnectTimeout = setTimeout(() => {
+                this.isReconnecting = false;
+                this.requestConnect();
+            }, delay);
+        }
+
+        recycle(reason) {
+            diag.recycled[reason] = (diag.recycled[reason] || 0) + 1;
+            this.clearTimers();
+            this.detachSocket();
+            this.connected = false;
+            this.isAlive = false;
+            this.stopMoveLoop();
+            this.scheduleReconnect();
+        }
+
+        check(now) {
+            if (this.stopped || !this.config.startedBots) return;
+            const ws = this.ws;
+            if (!ws) {
+                if (!this.isReconnecting && !this.queued) this.requestConnect();
+                return;
+            }
+            if (ws.readyState === WebSocket.CONNECTING) {
+                if (now - this.stateSince > this.connectionTimeout + 2000) this.recycle('connect');
+                return;
+            }
+            if (ws.readyState !== WebSocket.OPEN) {
+                if (!this.isReconnecting && now - this.stateSince > 3000) this.recycle('closing');
+                return;
+            }
+            if (this.isAlive) {
+                if (now - this.lastMessageAt > this.stallTimeout) this.recycle('stall');
+                return;
+            }
+            if (this.spawnReady) {
+                if (now - this.lastSpawnAt > this.spawnRetry) {
+                    if (this.spawnTries < 3) {
+                        this.spawnTries++;
+                        this.sendSpawn();
+                    } else {
+                        this.recycle('nospawn');
+                    }
+                }
+            } else if (now - this.stateSince > this.handshakeTimeout) {
+                this.recycle('handshake');
+            }
+        }
+
+        onopen(ws) {
+            if (ws !== this.ws) return;
+            connector.release(this);
+            this.connected = true;
+            this.stateSince = Date.now();
+            this.lastMessageAt = Date.now();
+            this.sendProtocolVersion();
+            this.sendClientVersion();
+        }
+
+        onclose(ws, ev) {
+            if (ws !== this.ws) return;
+            connector.release(this);
+            const code = ev && ev.code;
+            diag.closes[code] = (diag.closes[code] || 0) + 1;
+            noteCloseForStorm();
+            this.connected = false;
+            this.isAlive = false;
+            this.stateSince = Date.now();
+            this.stopMoveLoop();
+            this.scheduleReconnect();
+        }
+
+        onerror(ws) {
+            if (ws !== this.ws) return;
+            this.errorTimeout = setTimeout(() => {
+                try { ws.close(); } catch (e) {}
+            }, 1000);
+        }
+
+        onmessage(ws, event) {
+            if (ws !== this.ws) return;
+            this.lastMessageAt = Date.now();
+            let data = event.data;
+            if (!(data instanceof ArrayBuffer)) return;
+            if (this.decryptionKey) data = this.xorBuffer(data, this.decryptionKey ^ this.clientVersion);
+            this.handleBuffer(data);
+        }
+
+        send(buffer) {
+            const ws = this.ws;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (this.encryptionKey) {
+                buffer = this.xorBuffer(buffer, this.encryptionKey);
+                this.encryptionKey = this.rotateKey(this.encryptionKey);
+            }
+            ws.send(buffer);
+        }
+
+        startMoveLoop() {
+            this.stopMoveLoop();
+            this.moveInt = setInterval(() => this.move(), 40);
+        }
+
+        stopMoveLoop() {
+            if (this.moveInt) { clearInterval(this.moveInt); this.moveInt = null; }
+        }
+
+        closeSoon() {
+            const ws = this.ws;
+            setTimeout(() => { try { if (ws) ws.close(); } catch (e) {} }, 1000);
+        }
+
+        handleBuffer(buffer) {
+            try {
+                if (!buffer || buffer.byteLength < 1) return;
+                const reader = new Reader(buffer);
+                const type = reader.readUint8();
+
+                switch (type) {
+                    case 18:
+                        diag.resets++;
+                        this.cells.clear();
+                        this.pellets.clear();
+                        this.ownSet.clear();
+                        this.myCellIDs.length = 0;
+                        this.markDead();
+                        break;
+                    case 85:
+                        diag.op85++;
+                        this.closeSoon();
+                        break;
+                    case 32:
+                        if (reader.remaining() >= 4) {
+                            const id = reader.readUint32();
+                            if (!this.myCellIDs.includes(id)) this.myCellIDs.push(id);
+                            this.ownSet.add(id);
+                        }
+                        if (!this.isAlive) {
+                            this.isAlive = true;
+                            this.connectionAttempts = 0;
+                            this.spawnTries = 0;
+                            this.stateSince = Date.now();
+                            this.startMoveLoop();
+                        }
+                        break;
+                    case 241:
+                        if (reader.remaining() >= 4) {
+                            this.decryptionKey = reader.readUint32();
+                            this.serverVersion = reader.readString();
+                            const match = this.serverUrl && this.serverUrl.match(SERVER_RE);
+                            if (match) this.encryptionKey = this.murmur2(match[1] + this.serverVersion, 255);
+                        }
+                        break;
+                    case 242:
+                        this.spawnReady = true;
+                        this.sendSpawn();
+                        break;
+                    case 255:
+                        if (reader.remaining() >= 4) {
+                            const outSize = reader.readUint32();
+                            if (outSize > 0 && outSize <= 8 * 1024 * 1024) {
+                                const out = this.uncompressMessage(new Uint8Array(buffer, 5), new Uint8Array(outSize));
+                                this.handleMessage(out.buffer);
+                            }
+                        }
+                        break;
+                }
+            } catch (e) {}
+        }
+
+        handleMessage(buffer) {
+            try {
+                if (!buffer || buffer.byteLength < 1) return;
+                const reader = new Reader(buffer);
+                const type = reader.readUint8();
+                if (type === 16) this.updateNodes(reader);
+                else if (type === 64) this.updateOffset(reader);
+            } catch (e) {}
+        }
+
+        updateOffset(reader) {
+            if (reader.remaining() < 32) return;
+            const minX = reader.readFloat64();
+            const minY = reader.readFloat64();
+            const maxX = reader.readFloat64();
+            const maxY = reader.readFloat64();
+            if (maxX - minX > 14000) this.offsetX = (maxX + minX) / 2;
+            if (maxY - minY > 14000) this.offsetY = (maxY + minY) / 2;
+        }
+
+        removeCell(id) {
+            this.cells.delete(id);
+            this.pellets.delete(id);
+            this.ownSet.delete(id);
+            const i = this.myCellIDs.indexOf(id);
+            if (i !== -1) this.myCellIDs.splice(i, 1);
+        }
+
+        markDead() {
+            if (!this.isAlive) return;
+            diag.deaths++;
+            this.isAlive = false;
+            this.spawnTries = 0;
+            this.stateSince = Date.now();
+            this.stopMoveLoop();
+            this.followMouse = this.config.botAi ? false : !this.config.vShield;
+            this.fleeing = false;
+            this.respawnTimeout = setTimeout(() => this.sendSpawn(), 100);
+        }
+
+        updateNodes(reader) {
+            if (reader.remaining() < 2) return;
+
+            const eatCount = reader.readUint16();
+            for (let i = 0; i < eatCount; i++) {
+                if (reader.remaining() < 8) return;
+                reader.readUint32();
+                this.removeCell(reader.readUint32());
+            }
+
+            while (reader.remaining() >= 4) {
+                const id = reader.readUint32();
+                if (id === 0) break;
+                if (reader.remaining() < 11) return;
+
+                let entity = this.cells.get(id) || this.pellets.get(id);
+                if (!entity) {
+                    entity = new Entity();
+                    entity.id = id;
+                }
+                entity.x = reader.readInt32();
+                entity.y = reader.readInt32();
+                entity.size = reader.readUint16();
+
+                const flags = reader.readUint8();
+                const extendedFlags = flags & 128 ? reader.readUint8() : 0;
+
+                if (flags & 1) entity.isVirus = true;
+                if (flags & 2) { if (reader.remaining() < 3) return; reader.byteOffset += 3; }
+                if (flags & 4) reader.readString();
+                if (flags & 8) entity.name = reader.readUTF8String();
+                if (extendedFlags & 1) entity.isPellet = true;
+                if (extendedFlags & 2) entity.isFriend = true;
+                if (extendedFlags & 4) { if (reader.remaining() < 4) return; reader.byteOffset += 4; }
+                if (entity.isPellet) this.pellets.set(id, entity);
+                else this.cells.set(id, entity);
+            }
+
+            if (reader.remaining() >= 2) {
+                const removed = reader.readUint16();
+                for (let i = 0; i < removed && reader.remaining() >= 4; i++) {
+                    this.removeCell(reader.readUint32());
+                }
+            }
+
+            if (this.isAlive && this.myCellIDs.length === 0) this.markDead();
+        }
+
+        nearestPellet(bot, now) {
+            const c = this.pelletCache;
+            if (c && now - c.at < 4000) {
+                const cached = this.pellets.get(c.id);
+                if (cached) return cached;
+            }
+            let best = null, bestD = Infinity;
+            for (const e of this.pellets.values()) {
+                if (e.isFriend) continue;
+                const dx = e.x - bot.x;
+                const dy = e.y - bot.y;
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = e; }
+            }
+            this.pelletCache = best ? { id: best.id, at: now } : null;
+            return best;
+        }
+
+        scan(bot, now) {
+            const r = {
+                bigger: null, biggerDist: Infinity,
+                smaller: null, smallerDist: Infinity,
+                pellet: null,
+                virus: null, virusDist: Infinity
+            };
+            for (const e of this.cells.values()) {
+                if (e.isPellet || e.isFriend || this.ownSet.has(e.id)) continue;
+                const dx = e.x - bot.x;
+                const dy = e.y - bot.y;
+                const dist = Math.max(0, Math.sqrt(dx * dx + dy * dy) - (bot.size + e.size));
+
+                if (e.isVirus) {
+                    if (bot.size > e.size * 1.32 && dist < r.virusDist) { r.virusDist = dist; r.virus = e; }
+                } else if (e.name !== this.name) {
+                    if (e.size > bot.size * this.biggerPlayerAvoidanceRange) {
+                        if (dist < r.biggerDist) { r.biggerDist = dist; r.bigger = e; }
+                    } else if (e.size < bot.size) {
+                        if (dist < r.smallerDist) { r.smallerDist = dist; r.smaller = e; }
+                    }
+                }
+            }
+            r.pellet = this.nearestPellet(bot, now);
+            return r;
+        }
+
+        steerAway(bot, e) {
+            this.moveTo(bot.x + (bot.x - e.x), bot.y + (bot.y - e.y));
+        }
+
+        shouldFlee(enemy, dist, enterRange) {
+            if (!enemy) { this.fleeing = false; return false; }
+            if (this.fleeing) {
+                if (dist > enterRange * 1.5) { this.fleeing = false; return false; }
+                return true;
+            }
+            if (dist < enterRange) { this.fleeing = true; return true; }
+            return false;
+        }
+
+        randomMove(bot) {
+            const randomX = Math.floor(1337 * Math.random());
+            const randomY = Math.floor(1337 * Math.random());
+            this.moveTo(bot.x + (Math.random() > 0.5 ? randomX : -randomX), bot.y + (Math.random() > 0.5 ? -randomY : randomY));
+        }
+
+        farm(bot, s) {
+            if (s.pellet) this.moveTo(s.pellet.x, s.pellet.y);
+            else this.randomMove(bot);
+        }
+
+        move() {
+            if (!this.isAlive || this.myCellIDs.length === 0) return;
+
+            let sx = 0, sy = 0, n = 0, size = 0, maxCell = 0;
+            for (const id of this.myCellIDs) {
+                const c = this.cells.get(id);
+                if (!c) continue;
+                sx += c.x; sy += c.y; size += c.size; n++;
+                if (c.size > maxCell) maxCell = c.size;
+            }
+            if (!n) return;
+            const bot = { x: sx / n, y: sy / n, size };
+            const cords = this.config.cords;
+
+            // --- NUOVA FUNZIONE 1: Tricksplit Auto-Eject Routine ---
+            if (this.config.tricksplitActive) {
+                this.fleeing = false;
+                this.moveTo(cords.x + this.offsetX, cords.y + this.offsetY);
+                this.split();
+                this.eject();
+                return;
+            }
+
+            // --- NUOVA FUNZIONE 2: Patrol Orbit Mode ---
+            if (this.config.patrolMode) {
+                this.fleeing = false;
+                const angle = (Date.now() / 600) + (this.index * (Math.PI * 2 / Math.max(1, bots.length)));
+                const radius = 350;
+                const targetX = (cords.x + this.offsetX) + Math.cos(angle) * radius;
+                const targetY = (cords.y + this.offsetY) + Math.sin(angle) * radius;
+                this.moveTo(targetX, targetY);
+                return;
+            }
+
+            // --- NUOVA FUNZIONE 3: Freeze Position ---
+            if (this.config.freezeBots) {
+                this.moveTo(bot.x, bot.y);
+                return;
+            }
+
+            const s = this.scan(bot, Date.now());
+            const detectionRange2 = bot.size * 1.2;
+
+            if (this.config.vShield && s.virus && (maxCell * maxCell) / 100 >= 132) {
+                this.fleeing = false;
+                this.moveTo(s.virus.x, s.virus.y);
+                return;
+            }
+
+            if (this.followMouse) {
+                this.fleeing = false;
+                this.moveTo(cords.x + this.offsetX, cords.y + this.offsetY);
+            } else {
+                if (this.myCellIDs.length > 1) {
+                    this.farm(bot, s);
+                } else if (this.shouldFlee(s.bigger, s.biggerDist, this.avoidanceDistance + detectionRange2)) {
+                    this.steerAway(bot, s.bigger);
+                } else if (s.smaller && s.smaller.size <= bot.size * 0.83) {
+                    this.moveTo(s.smaller.x, s.smaller.y);
+                } else {
+                    this.farm(bot, s);
+                }
+            }
+        }
+
+        sendProtocolVersion() {
+            const ws = this.ws;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const w = new Writer(5);
+            w.writeUint8(254);
+            w.writeUint32(this.protocolVersion);
+            ws.send(w.toBuffer());
+        }
+
+        sendClientVersion() {
+            const ws = this.ws;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const w = new Writer(5);
+            w.writeUint8(255);
+            w.writeUint32(this.clientVersion);
+            ws.send(w.toBuffer());
+        }
+
+        sendSpawn() {
+            this.lastSpawnAt = Date.now();
+            let finalName = this.name;
+            // --- NUOVA FUNZIONE 4: Name Tag Cloner ---
+            if (this.config.clonePlayerName && this.config.targetPlayerName) {
+                finalName = this.config.targetPlayerName;
+            }
+            const w = new Writer(finalName.length * 4 + 2);
+            w.writeUint8(0);
+            w.writeUTF8String(finalName);
+            this.send(w.toBuffer());
+        }
+
+        moveTo(x, y) {
+            const buf = new ArrayBuffer(13);
+            const dv = new DataView(buf);
+            dv.setUint8(0, 16);
+            dv.setInt32(1, Number.isFinite(x) ? Math.round(x) : 0, true);
+            dv.setInt32(5, Number.isFinite(y) ? Math.round(y) : 0, true);
+            dv.setUint32(9, this.decryptionKey, true);
+            this.send(buf);
+        }
+
+        split() {
+            if (this.isAlive) this.send(new Uint8Array([17]).buffer);
+        }
+
+        eject() {
+            if (this.isAlive) this.send(new Uint8Array([21]).buffer);
+        }
+
+        rotateKey(key) {
+            key = Math.imul(key, 1540483477) >> 0;
+            key = Math.imul(key >>> 24 ^ key, 1540483477) >> 0 ^ 114296087;
+            key = Math.imul(key >>> 13 ^ key, 1540483477) >> 0;
+            return key >>> 15 ^ key;
+        }
+
+        xorBuffer(buffer, key) {
+            try {
+                const dv = new DataView(buffer);
+                for (let i = 0; i < dv.byteLength; i++) {
+                    dv.setUint8(i, dv.getUint8(i) ^ key >>> i % 4 * 8 & 255);
+                }
+                return buffer;
+            } catch (e) { return buffer; }
+        }
+
+        uncompressMessage(compressed, output) {
+            try {
+                for (let i = 0, j = 0; i < compressed.length;) {
+                    const token = compressed[i++];
+                    let literalLength = token >> 4;
+                    if (literalLength > 0) {
+                        let ext = literalLength + 240;
+                        for (; ext === 255;) {
+                            if (i >= compressed.length) return output;
+                            ext = compressed[i++];
+                            literalLength += ext;
+                        }
+                        const end = Math.min(i + literalLength, compressed.length);
+                        const n = Math.min(end - i, output.length - j);
+                        if (n > 0) output.set(compressed.subarray(i, i + n), j);
+                        j += end - i;
+                        i = end;
+                        if (i === compressed.length) return output;
+                    }
+                    if (i + 1 >= compressed.length) return output;
+                    const offset = compressed[i++] | compressed[i++] << 8;
+                    if (offset === 0 || offset > j) return output;
+                    let matchLength = token & 15;
+                    let ext = matchLength + 240;
+                    for (; ext === 255;) {
+                        if (i >= compressed.length) return output;
+                        ext = compressed[i++];
+                        matchLength += ext;
+                    }
+                    let pos = j - offset;
+                    const end = Math.min(j + matchLength + 4, output.length);
+                    for (; j < end;) output[j++] = output[pos++];
+                }
+                return output;
+            } catch (e) { return output; }
+        }
+
+        murmur2(str, seed) {
+            let length = str.length;
+            let h = seed ^ length;
+            let i = 0;
+            let k;
+            while (length >= 4) {
+                k = str.charCodeAt(i) & 255 | (str.charCodeAt(++i) & 255) << 8 | (str.charCodeAt(++i) & 255) << 16 | (str.charCodeAt(++i) & 255) << 24;
+                k = (k & 65535) * 1540483477 + (((k >>> 16) * 1540483477 & 65535) << 16);
+                k ^= k >>> 24;
+                k = (k & 65535) * 1540483477 + (((k >>> 16) * 1540483477 & 65535) << 16);
+                h = (h & 65535) * 1540483477 + (((h >>> 16) * 1540483477 & 65535) << 16) ^ k;
+                length -= 4;
+                ++i;
+            }
+            switch (length) {
+                case 3: h ^= (str.charCodeAt(i + 2) & 255) << 16;
+                case 2: h ^= (str.charCodeAt(i + 1) & 255) << 8;
+                case 1: h ^= str.charCodeAt(i) & 255;
+                    h = (h & 65535) * 1540483477 + (((h >>> 16) * 1540483477 & 65535) << 16);
+            }
+            h ^= h >>> 13;
+            h = (h & 65535) * 1540483477 + (((h >>> 16) * 1540483477 & 65535) << 16);
+            h ^= h >>> 15;
+            return h >>> 0;
+        }
+
+        stop() {
+            this.stopped = true;
+            connector.remove(this);
+            this.clearTimers();
+            this.stopMoveLoop();
+            this.detachSocket();
+            this.connected = false;
+            this.isAlive = false;
+        }
+    }
+
+    const botConfig = {
+        botAi: false,
+        vShield: false,
+        // Nuove variabili di configurazione (5 Nuove Funzioni)
+        freezeBots: false,
+        patrolMode: false,
+        tricksplitActive: false,
+        clonePlayerName: false,
+        targetPlayerName: "",
+        keybinds: { modeKey: "F", feedKey: "C", splitKey: "X", vShieldKey: "V", freezeKey: "T", patrolKey: "P", trickKey: "G" },
+        cords: { x: 0, y: 0 },
+        botCount: (() => {
+            const saved = parseInt(storage.get("gx-bot-qty"));
+            return saved ? Math.min(500, Math.max(1, saved)) : 10;
+        })(),
+        agarServer: null,
+        stoppedBots: true,
+        startedBots: false
+    };
+
+    const bots = [];
+    let superviseTimer = null;
+    let isStarting = false;
+    let isStopping = false;
+    let hasRun = false;
+    let startTime = null;
+    let notice = null;
+
+    function showNotice(text, ms = 3000) {
+        notice = { text, until: Date.now() + ms };
+        render();
+    }
+
+    function startBots(action) {
+        if (isStarting || isStopping) {
+            if (isStopping) showNotice("Stopping...");
+            return;
+        }
+
+        if ((action === "stfinish" || action === "start") && !botConfig.startedBots) {
+            if (!botConfig.agarServer) {
+                showNotice("Join a game first");
+                return;
+            }
+            isStarting = true;
+            notice = null;
+            botConfig.startedBots = true;
+            botConfig.stoppedBots = false;
+            hasRun = true;
+            startTime = Date.now();
+            SoundFX.playStart(); // Effetto sonoro START
+            updateBotCount();
+            isStarting = false;
+            render();
+        } else if (action === "stop" && botConfig.startedBots) {
+            isStopping = true;
+            notice = null;
+            botConfig.startedBots = false;
+            botConfig.stoppedBots = true;
+            botConfig.botAi = false;
+            botConfig.vShield = false;
+            botConfig.freezeBots = false;
+            botConfig.patrolMode = false;
+            botConfig.tricksplitActive = false;
+            startTime = null;
+            SoundFX.playStop(); // Effetto sonoro STOP
+            clearInterval(superviseTimer);
+            superviseTimer = null;
+            const reduce = setInterval(() => {
+                if (bots.length > 0) {
+                    bots.pop().stop();
+                } else {
+                    clearInterval(reduce);
+                    isStopping = false;
+                    render();
+                }
+            }, 10);
+            render();
+        }
+    }
+
+    function supervise() {
+        if (!botConfig.startedBots || isStopping) return;
+        const baseName = storage.get("gx-bot-tag") || "XEVBOTS";
+        while (bots.length < botConfig.botCount) {
+            const idx = bots.length;
+            bots.push(new Bot(botConfig, `${baseName}${idx + 1}`, idx));
+        }
+        while (bots.length > botConfig.botCount) bots.pop().stop();
+        const now = Date.now();
+        for (const b of bots) {
+            try { b.check(now); } catch (e) {}
+        }
+    }
+
+    function updateBotCount() {
+        if (!botConfig.startedBots) return;
+        const baseName = storage.get("gx-bot-tag") || "XEVBOTS";
+        while (bots.length < botConfig.botCount) {
+            const idx = bots.length;
+            bots.push(new Bot(botConfig, `${baseName}${idx + 1}`, idx));
+        }
+        while (bots.length > botConfig.botCount) bots.pop().stop();
+        if (!superviseTimer) superviseTimer = setInterval(supervise, 1000);
+    }
+
+    function applyFollowMode() {
+        const follow = !botConfig.botAi && !botConfig.vShield && !botConfig.freezeBots && !botConfig.patrolMode;
+        bots.forEach((b) => { b.followMouse = follow; });
+    }
+
+    function toggleAI() {
+        botConfig.botAi = !botConfig.botAi;
+        applyFollowMode();
+        render();
+    }
+
+    function toggleVShield() {
+        botConfig.vShield = !botConfig.vShield;
+        applyFollowMode();
+        render();
+    }
+
+    // Handlers per le nuove funzionalità
+    function toggleFreeze() {
+        botConfig.freezeBots = !botConfig.freezeBots;
+        applyFollowMode();
+        render();
+    }
+
+    function togglePatrol() {
+        botConfig.patrolMode = !botConfig.patrolMode;
+        applyFollowMode();
+        render();
+    }
+
+    function triggerTricksplit() {
+        botConfig.tricksplitActive = true;
+        showNotice("TRICKSPLIT!", 1000);
+        setTimeout(() => {
+            botConfig.tricksplitActive = false;
+        }, 300);
+    }
+
+    // --- NUOVA FUNZIONE 5: Live Mass Aggregator ---
+    function getTotalBotMass() {
+        let total = 0;
+        for (const b of bots) {
+            if (b.isAlive) {
+                for (const id of b.myCellIDs) {
+                    const cell = b.cells.get(id);
+                    if (cell) total += Math.floor((cell.size * cell.size) / 100);
+                }
+            }
+        }
+        return total;
+    }
+
+    const MOUSE_SCRIPT = `
+        (function() {
+            if (window.__scarzBots) return;
+            let lastMouseX = 0, lastMouseY = 0;
+            let worldX = 0, worldY = 0;
+            let cameraFound = false;
+            let camKey = null;
+            let lastScan = 0;
+            function camWorld(cam) {
+                if (cam && typeof cam.x === 'number' && typeof cam.y === 'number' && typeof cam.scale === 'number') {
+                    if (cam.scale > 0 && cam.scale < 100 && Math.abs(cam.x) < 1000000) {
+                        const wx = (lastMouseX - cam.x) / cam.scale;
+                        const wy = (lastMouseY - cam.y) / cam.scale;
+                        if (Math.abs(wx) < 50000 && Math.abs(wy) < 50000) return { x: wx, y: wy };
+                    }
+                }
+                return null;
+            }
+            function getMouseWorldPosition() {
+                try {
+                    if (window.app && window.app.unitManager && window.app.unitManager.activeUnit) {
+                        const unit = window.app.unitManager.activeUnit;
+                        if (unit.cursor && typeof unit.cursor.x === 'number' && typeof unit.cursor.y === 'number') {
+                            return { x: unit.cursor.x, y: unit.cursor.y };
+                        }
+                    }
+                    if (window.app && window.app.mouse) {
+                        const mouse = window.app.mouse;
+                        if (typeof mouse.x === 'number' && typeof mouse.y === 'number' && Math.abs(mouse.x) < 50000 && Math.abs(mouse.y) < 50000) {
+                            return { x: mouse.x, y: mouse.y };
+                        }
+                        if (typeof mouse.worldX === 'number' && typeof mouse.worldY === 'number') {
+                            return { x: mouse.worldX, y: mouse.worldY };
+                        }
+                    }
+                    if (window.core && window.core.camera) {
+                        const cam = window.core.camera;
+                        if (typeof cam.x === 'number' && typeof cam.y === 'number' && typeof cam.scale === 'number') {
+                            const wx = (lastMouseX - cam.x) / cam.scale;
+                            const wy = (lastMouseY - cam.y) / cam.scale;
+                            if (Math.abs(wx) < 50000 && Math.abs(wy) < 50000) return { x: wx, y: wy };
+                        }
+                    }
+                    if (camKey) {
+                        try {
+                            const holder = window[camKey];
+                            const p = holder && holder.camera ? camWorld(holder.camera) : null;
+                            if (p) return p;
+                        } catch (e) {}
+                        camKey = null;
+                    }
+                    const now = Date.now();
+                    if (now - lastScan >= 250) {
+                        lastScan = now;
+                        for (const key in window) {
+                            try {
+                                const obj = window[key];
+                                if (obj && typeof obj === 'object' && obj.camera) {
+                                    const p = camWorld(obj.camera);
+                                    if (p) { camKey = key; return p; }
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                    return null;
+                } catch (e) { return null; }
+            }
+            document.addEventListener('mousemove', function(e) { lastMouseX = e.clientX; lastMouseY = e.clientY; }, true);
+            function updatePosition() {
+                try {
+                    const pos = getMouseWorldPosition();
+                    if (pos) { worldX = pos.x; worldY = pos.y; if (!cameraFound) cameraFound = true; }
+                } catch (e) {}
+                requestAnimationFrame(updatePosition);
+            }
+            updatePosition();
+            window.__scarzBots = {
+                getWorldX: function() { return worldX; },
+                getWorldY: function() { return worldY; },
+                isReady: function() { return cameraFound; },
+                setMouse: function(x, y) { lastMouseX = x; lastMouseY = y; }
+            };
+        })();
+    `;
+
+    let injectAttempts = 0;
+
+    function injectDeltaScript() {
+        if (window.__scarzBots || injectAttempts >= 5) return;
+        injectAttempts++;
+        const script = document.createElement("script");
+        script.textContent = MOUSE_SCRIPT;
+        (document.head || document.documentElement).appendChild(script);
+    }
+
+    function getMousePosition() {
+        try {
+            if (window.__scarzBots) {
+                const x = window.__scarzBots.getWorldX();
+                const y = window.__scarzBots.getWorldY();
+                if (isFinite(x) && isFinite(y) && Math.abs(x) < 50000 && Math.abs(y) < 50000) return { x, y };
+            }
+        } catch (e) {}
+        const rawX = botConfig.cords._rawX || window.innerWidth / 2;
+        const rawY = botConfig.cords._rawY || window.innerHeight / 2;
+        return { x: rawX, y: rawY };
+    }
+
+    function updateMouseWorld() {
+        const mp = getMousePosition();
+        botConfig.cords.x = mp.x;
+        botConfig.cords.y = mp.y;
+    }
+
+    const panelId = "gx_panel_" + Math.floor(100 + Math.random() * 900);
+    let uiHost = null;
+    let uiRoot = null;
+
+    // --- NUOVO STILE MENU: Cyberpunk/Glassmorphism Neon UI ---
+    const CSS = `
+        *, *::before, *::after { box-sizing: border-box; }
+        button, input { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; }
+        .gx-info-panel {
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6), 0 0 15px rgba(0, 240, 255, 0.2);
+            background: rgba(13, 17, 23, 0.75);
+            position: fixed;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            max-width: calc(100vw - 16px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 6px;
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            border: 1px solid rgba(0, 240, 255, 0.3);
+            border-radius: 12px;
+            padding: 8px 14px;
+            pointer-events: auto;
+            backdrop-filter: blur(16px);
+            transition: border-color 0.3s ease;
+        }
+        .gx-info-panel:hover { border-color: rgba(0, 240, 255, 0.6); }
+        .gx-status-wrap { display: flex; align-items: center; gap: 8px; }
+        .gx-status-row { display: flex; align-items: center; gap: 6px; }
+        .gx-brand {
+            color: #00f0ff; font-size: 13px; font-weight: 900; cursor: pointer;
+            text-decoration: none; letter-spacing: 0.8px; transition: all 0.2s ease; line-height: 1;
+            text-shadow: 0 0 8px rgba(0,240,255,0.6);
+        }
+        .gx-brand:hover { transform: scale(1.05); color: #ffffff; text-shadow: 0 0 12px rgba(255,255,255,0.9); }
+        .bot-text { color: #d1d5db; font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap; }
+        .status-indicator {
+            display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+            flex-shrink: 0; vertical-align: middle;
+        }
+        .status-offline { background: #ff3366; box-shadow: 0 0 8px #ff3366; }
+        .status-running { background: #00ff88; box-shadow: 0 0 10px #00ff88; animation: gx-pulse 1.2s infinite; }
+        .status-stopped { background: #ffcc00; box-shadow: 0 0 8px #ffcc00; }
+        .status-green   { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+        @keyframes gx-pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+        .stopwatch { color: #00ff88; font-size: 11px; font-weight: 700; display: none; letter-spacing: 1px; line-height: 1; text-shadow: 0 0 6px rgba(0,255,136,0.5); }
+        .gx-sep { width: 1px; height: 26px; background: rgba(255,255,255,0.15); margin: 0 4px; }
+        .gx-stat { display: flex; flex-direction: column; align-items: center; min-width: 48px; }
+        .gx-stat-label { color: rgba(255,255,255,0.5); font-size: 8px; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; }
+        .gx-stat-value { color: #fff; font-size: 12px; font-weight: 800; text-shadow: 0 0 5px rgba(255,255,255,0.3); }
+        .bot-button, .small-button {
+            color: #ffffff; border: 1px solid rgba(255,255,255,0.15); cursor: pointer; border-radius: 8px;
+            transition: all 0.2s ease; display: inline-flex; align-items: center; justify-content: center;
+            backdrop-filter: blur(6px); white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .bot-button { background: rgba(255,255,255,0.05); padding: 6px 12px; font-size: 11px; font-weight: 800; gap: 5px; }
+        .small-button { background: rgba(255,255,255,0.05); padding: 5px 8px; font-size: 10px; font-weight: 700; gap: 3px; }
+        .bot-button:hover, .small-button:hover {
+            background: rgba(0, 240, 255, 0.2); border-color: rgba(0, 240, 255, 0.6); color: #fff;
+            transform: translateY(-1px); box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+        }
+        .bot-button.start-btn { background: rgba(0,255,136,0.12); border-color: rgba(0,255,136,0.4); color: #00ff88; }
+        .bot-button.start-btn:hover { background: rgba(0,255,136,0.3); box-shadow: 0 0 12px rgba(0,255,136,0.5); }
+        .bot-button.stop-btn { background: rgba(255,51,102,0.12); border-color: rgba(255,51,102,0.4); color: #ff3366; }
+        .bot-button.stop-btn:hover { background: rgba(255,51,102,0.3); box-shadow: 0 0 12px rgba(255,51,102,0.5); }
+        .small-button.active { background: rgba(255,0,128,0.4); border-color: rgba(255,0,128,0.8); color: #fff; box-shadow: 0 0 10px rgba(255,0,128,0.5); }
+        .bot-button.cfg-btn { padding: 6px 9px; font-size: 13px; border-radius: 8px; }
+
+        #settings-modal {
+            position: fixed; top: 65px; left: 50%; transform: translateX(-50%);
+            background: rgba(13, 17, 23, 0.92); padding: 18px;
+            border: 1px solid rgba(0, 240, 255, 0.4); border-radius: 14px;
+            color: #ffffff; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.8), 0 0 20px rgba(0,240,255,0.2); backdrop-filter: blur(18px);
+            width: 340px; max-width: calc(100vw - 16px); pointer-events: auto;
+        }
+        .settings-title { font-size: 14px; font-weight: 800; color: #00f0ff; margin-bottom: 12px; text-align: center; letter-spacing: 1px; text-transform: uppercase; text-shadow: 0 0 8px rgba(0,240,255,0.5); }
+        .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .settings-label { margin: 0 0 4px; font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.7); text-transform: uppercase; }
+        .settings-input {
+            width: 100%; padding: 6px 10px; background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 6px;
+            font-size: 11px; transition: all 0.2s ease;
+        }
+        .settings-input:focus { border-color: #00f0ff; box-shadow: 0 0 8px rgba(0,240,255,0.4); outline: none; }
+        .keybind-section { margin-top: 12px; }
+        .keybind-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+        .keybind-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+        .keybind-label { color: rgba(255,255,255,0.7); font-size: 9px; font-weight: 600; flex-grow: 1; text-transform: uppercase; }
+        .settings-key {
+            padding: 3px 6px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2);
+            color: #00f0ff; border-radius: 4px; font-size: 10px; font-weight: 700; text-align: center; width: 34px;
+        }
+        .settings-save {
+            background: linear-gradient(135deg, #00f0ff, #0077ff); color: #fff; border: none; padding: 9px;
+            cursor: pointer; border-radius: 8px; font-size: 11px; font-weight: 800; text-align: center;
+            width: 100%; margin-top: 14px; transition: all 0.2s ease; text-transform: uppercase; letter-spacing: 1px;
+            box-shadow: 0 0 10px rgba(0,240,255,0.3);
+        }
+        .settings-save:hover { background: linear-gradient(135deg, #33f3ff, #3399ff); transform: translateY(-1px); box-shadow: 0 0 15px rgba(0,240,255,0.6); }
+    `;
+
+    const PANEL_HTML = `
+        <div class="gx-info-panel" id="gx-panel">
+            <div class="gx-status-wrap">
+                <div class="gx-status-row">
+                    <a class="gx-brand" href="https://www.youtube.com/@Scarzbro" target="_blank" rel="noopener noreferrer">Zero PRO 4.3</a>
+                    <span class="status-indicator status-green" id="status-light"></span>
+                    <span class="bot-text" id="status">Online</span>
+                </div>
+                <span id="stopwatch" class="stopwatch">00:00</span>
+            </div>
+            <div class="gx-sep"></div>
+            <div class="gx-stat">
+                <span class="gx-stat-label">Bots</span>
+                <span class="gx-stat-value gx-botCount">10</span>
+            </div>
+            <div class="gx-stat">
+                <span class="gx-stat-label">Massa</span>
+                <span class="gx-stat-value gx-botMass">0</span>
+            </div>
+            <div class="gx-sep"></div>
+            <button type="button" class="bot-button start-btn gx-stfinish">▶ Start</button>
+            <button type="button" class="bot-button stop-btn gx-stop" style="display:none">■ Stop</button>
+            <div class="gx-sep"></div>
+            <button type="button" class="small-button gx-ai-btn">AI OFF</button>
+            <button type="button" class="small-button gx-vs-btn">VSH OFF</button>
+            <button type="button" class="small-button gx-frz-btn">FRZ OFF</button>
+            <button type="button" class="small-button gx-ptl-btn">PTL OFF</button>
+            <button type="button" class="bot-button cfg-btn" title="Settings">⚙</button>
+        </div>
+    `;
+
+    const SETTINGS_HTML = `
+        <div class="settings-title">ZeroExtens v4.3 Config</div>
+        <div class="settings-grid">
+            <div>
+                <div class="settings-label">Bot Prefix / Name</div>
+                <input type="text" id="botName" class="settings-input" autocomplete="off" spellcheck="false">
+            </div>
+            <div>
+                <div class="settings-label">Bot Amount (1-500)</div>
+                <input type="number" id="gx-bot-qty" class="settings-input" min="1" max="500">
+            </div>
+        </div>
+        <div style="margin-top: 8px;">
+            <div class="settings-label">Clona Nome Giocatore (Cloner)</div>
+            <input type="text" id="targetPlayerName" class="settings-input" placeholder="Nome target da clonare..." autocomplete="off">
+        </div>
+        <div class="keybind-section">
+            <div class="settings-label">Scorciatoie da Tastiera</div>
+            <div class="keybind-grid">
+                <div class="keybind-row"><span class="keybind-label">Split</span><input type="text" class="settings-key" id="key-split" maxlength="1"></div>
+                <div class="keybind-row"><span class="keybind-label">Feed</span><input type="text" class="settings-key" id="key-feed" maxlength="1"></div>
+                <div class="keybind-row"><span class="keybind-label">AI Mode</span><input type="text" class="settings-key" id="key-mode" maxlength="1"></div>
+                <div class="keybind-row"><span class="keybind-label">VShield</span><input type="text" class="settings-key" id="key-vshield" maxlength="1"></div>
+                <div class="keybind-row"><span class="keybind-label">Freeze</span><input type="text" class="settings-key" id="key-freeze" maxlength="1"></div>
+                <div class="keybind-row"><span class="keybind-label">Patrol</span><input type="text" class="settings-key" id="key-patrol" maxlength="1"></div>
+                <div class="keybind-row"><span class="keybind-label">Tricksplit</span><input type="text" class="settings-key" id="key-trick" maxlength="1"></div>
+            </div>
+        </div>
+        <button type="button" class="settings-save">Salva e Chiudi</button>
+    `;
+
+    const $ = (sel) => (uiRoot ? uiRoot.querySelector(sel) : null);
+
+    function setText(el, text) {
+        if (el && el.textContent !== text) el.textContent = text;
+    }
+
+    function pad2(n) { return String(n).padStart(2, "0"); }
+
+    function render() {
+        if (!uiRoot) return;
+        const running = botConfig.startedBots;
+
+        const startBtn = $(".gx-stfinish");
+        const stopBtn = $(".gx-stop");
+        if (startBtn) startBtn.style.display = running ? "none" : "inline-flex";
+        if (stopBtn) stopBtn.style.display = running ? "inline-flex" : "none";
+
+        let alive = 0, connected = 0, connecting = 0;
+        for (const b of bots) {
+            if (b.isAlive) alive++;
+            if (b.connected) connected++;
+            if (b.ws && b.ws.readyState === 0) connecting++;
+        }
+        setText($(".gx-botCount"), running ? `${alive}/${botConfig.botCount}` : String(botConfig.botCount));
+
+        // Aggiorna Massa Totale Bot (Nuova Funzione 5)
+        setText($(".gx-botMass"), running ? String(getTotalBotMass()) : "0");
+
+        const stat = $(".gx-stat");
+        if (stat) {
+            const waiting = Math.max(0, bots.length - connected - connecting);
+            const stormLeft = Math.max(0, stormGuard.cooldownUntil - Date.now());
+            const tip = `alive ${alive} · connected ${connected} · connecting ${connecting} · waiting ${waiting}\ncloses ${JSON.stringify(diag.closes)}\nreset ${diag.resets} · op85 ${diag.op85} · deaths ${diag.deaths}\nrecycled ${JSON.stringify(diag.recycled)}\ncrash-guard ${stormLeft > 0 ? "active (" + Math.ceil(stormLeft / 1000) + "s)" : "idle"}`;
+            if (stat.title !== tip) stat.title = tip;
+        }
+
+        let text, cls;
+        if (notice && Date.now() < notice.until) { text = notice.text; cls = "status-stopped"; }
+        else if (running) { text = "Running"; cls = "status-running"; }
+        else if (hasRun) { text = "Stopped"; cls = "status-stopped"; }
+        else { text = "Online"; cls = "status-green"; }
+        setText($("#status"), text);
+        const light = $("#status-light");
+        if (light) {
+            const want = "status-indicator " + cls;
+            if (light.className !== want) light.className = want;
+        }
+
+        const sw = $("#stopwatch");
+        if (sw) {
+            sw.style.display = running ? "block" : "none";
+            if (running && startTime) {
+                const e = Date.now() - startTime;
+                setText(sw, `${pad2(Math.floor(e / 60000))}:${pad2(Math.floor((e % 60000) / 1000))}`);
+            } else {
+                setText(sw, "00:00");
+            }
+        }
+
+        const ai = $(".gx-ai-btn");
+        if (ai) { setText(ai, `AI ${botConfig.botAi ? "ON" : "OFF"}`); ai.classList.toggle("active", botConfig.botAi); }
+        const vs = $(".gx-vs-btn");
+        if (vs) { setText(vs, `VSH ${botConfig.vShield ? "ON" : "OFF"}`); vs.classList.toggle("active", botConfig.vShield); }
+
+        // Render stato nuovi pulsanti
+        const frz = $(".gx-frz-btn");
+        if (frz) { setText(frz, `FRZ ${botConfig.freezeBots ? "ON" : "OFF"}`); frz.classList.toggle("active", botConfig.freezeBots); }
+        const ptl = $(".gx-ptl-btn");
+        if (ptl) { setText(ptl, `PTL ${botConfig.patrolMode ? "ON" : "OFF"}`); ptl.classList.toggle("active", botConfig.patrolMode); }
+    }
+
+    function buildUI() {
+        const host = document.createElement("div");
+        host.id = panelId;
+        host.style.cssText = "all:initial;position:fixed;top:0;left:0;width:0;height:0;overflow:visible;" +
+            "z-index:2147483647;pointer-events:none;display:block;";
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML = `<style>${CSS}</style>${PANEL_HTML}`;
+
+        const on = (sel, type, fn) => {
+            const el = root.querySelector(sel);
+            if (el) el.addEventListener(type, fn);
+        };
+        on(".gx-stfinish", "click", () => startBots("start"));
+        on(".gx-stop", "click", () => startBots("stop"));
+        on(".gx-ai-btn", "click", toggleAI);
+        on(".gx-vs-btn", "click", toggleVShield);
+        on(".gx-frz-btn", "click", toggleFreeze);
+        on(".gx-ptl-btn", "click", togglePatrol);
+        on(".cfg-btn", "click", toggleSettings);
+
+        root.querySelectorAll("button").forEach((b) => {
+            b.tabIndex = -1;
+            b.addEventListener("mousedown", (e) => e.preventDefault());
+        });
+        ["mousedown", "mouseup", "dblclick", "contextmenu", "wheel"].forEach((t) => {
+            root.addEventListener(t, (e) => e.stopPropagation());
+        });
+
+        uiHost = host;
+        uiRoot = root;
+        document.documentElement.appendChild(host);
+    }
+
+    function openSettings() {
+        if (!uiRoot || $("#settings-modal")) return;
+        const modal = document.createElement("div");
+        modal.id = "settings-modal";
+        modal.innerHTML = SETTINGS_HTML;
+        uiRoot.appendChild(modal);
+
+        $("#botName").value = storage.get("gx-bot-tag") || "XEVBOTS";
+        $("#gx-bot-qty").value = String(botConfig.botCount);
+        $("#targetPlayerName").value = botConfig.targetPlayerName || "";
+        $("#key-split").value = botConfig.keybinds.splitKey;
+        $("#key-feed").value = botConfig.keybinds.feedKey;
+        $("#key-mode").value = botConfig.keybinds.modeKey;
+        $("#key-vshield").value = botConfig.keybinds.vShieldKey;
+        $("#key-freeze").value = botConfig.keybinds.freezeKey || "T";
+        $("#key-patrol").value = botConfig.keybinds.patrolKey || "P";
+        $("#key-trick").value = botConfig.keybinds.trickKey || "G";
+
+        ["keydown", "keyup", "keypress"].forEach((t) => modal.addEventListener(t, (e) => e.stopPropagation()));
+        const save = modal.querySelector(".settings-save");
+        save.tabIndex = -1;
+        save.addEventListener("click", toggleSettings);
+    }
+
+    function saveSettings() {
+        const nameEl = $("#botName");
+        const amountEl = $("#gx-bot-qty");
+        const targetNameEl = $("#targetPlayerName");
+        if (!nameEl || !amountEl) return;
+
+        const botName = nameEl.value.trim() || "XEVBOTS";
+        let amount = parseInt(amountEl.value);
+        if (isNaN(amount) || amount < 1) amount = 10;
+        if (amount > 500) amount = 500;
+        storage.set("gx-bot-tag", botName);
+        storage.set("gx-bot-qty", String(amount));
+        botConfig.botCount = amount;
+
+        if (targetNameEl) {
+            botConfig.targetPlayerName = targetNameEl.value.trim();
+            botConfig.clonePlayerName = botConfig.targetPlayerName.length > 0;
+        }
+
+        bots.forEach((b, idx) => { b.name = `${botName}${idx + 1}`; });
+
+        const key = (id, fallback) => {
+            const el = $(id);
+            return (el && el.value.trim().toUpperCase()) || fallback;
+        };
+        botConfig.keybinds.splitKey = key("#key-split", "X");
+        botConfig.keybinds.feedKey = key("#key-feed", "C");
+        botConfig.keybinds.modeKey = key("#key-mode", "F");
+        botConfig.keybinds.vShieldKey = key("#key-vshield", "V");
+        botConfig.keybinds.freezeKey = key("#key-freeze", "T");
+        botConfig.keybinds.patrolKey = key("#key-patrol", "P");
+        botConfig.keybinds.trickKey = key("#key-trick", "G");
+        storage.set("gx-keybinds", JSON.stringify(botConfig.keybinds));
+
+        updateBotCount();
+        render();
+    }
+
+    function toggleSettings() {
+        const modal = $("#settings-modal");
+        if (modal) {
+            saveSettings();
+            modal.remove();
+        } else {
+            openSettings();
+        }
+    }
+
+    function loadKeybinds() {
+        const saved = storage.get("gx-keybinds");
+        if (!saved) return;
+        try {
+            const p = JSON.parse(saved);
+            const k = botConfig.keybinds;
+            k.modeKey = p.modeKey || k.modeKey;
+            k.feedKey = p.feedKey || k.feedKey;
+            k.splitKey = p.splitKey || k.splitKey;
+            k.vShieldKey = p.vShieldKey || k.vShieldKey;
+            k.freezeKey = p.freezeKey || "T";
+            k.patrolKey = p.patrolKey || "P";
+            k.trickKey = p.trickKey || "G";
+        } catch (e) {}
+    }
+
+    function isTyping(event) {
+        const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+        const t = path[0] || event.target;
+        if (!t || !t.tagName) return false;
+        const tag = t.tagName;
+        return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable === true;
+    }
+
+    function matchKey(event, bind) {
+        if (!bind) return false;
+        const b = bind.toUpperCase();
+        if (event.key && event.key.length === 1 && event.key.toUpperCase() === b) return true;
+        return event.code === "Key" + b || event.code === "Digit" + b;
+    }
+
+    function onKeyDown(event) {
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (isTyping(event)) return;
+        const kb = botConfig.keybinds;
+
+        if (event.key === "F1") {
+            event.preventDefault();
+            startBots("start");
+            return;
+        }
+        if (event.key === "F2") {
+            event.preventDefault();
+            startBots("stop");
+            return;
+        }
+        if (event.key === "F3") {
+            event.preventDefault();
+            toggleSettings();
+            return;
+        }
+
+        if (matchKey(event, kb.modeKey)) {
+            event.preventDefault();
+            if (!event.repeat) toggleAI();
+        } else if (matchKey(event, kb.feedKey)) {
+            event.preventDefault();
+            if (bots.length > 0 && !botConfig.botAi) bots.forEach((b) => { try { b.eject(); } catch (e) {} });
+        } else if (matchKey(event, kb.splitKey)) {
+            event.preventDefault();
+            if (bots.length > 0 && !botConfig.botAi) bots.forEach((b) => { try { b.split(); } catch (e) {} });
+        } else if (matchKey(event, kb.vShieldKey)) {
+            event.preventDefault();
+            if (!event.repeat) toggleVShield();
+        } else if (matchKey(event, kb.freezeKey)) {
+            event.preventDefault();
+            if (!event.repeat) toggleFreeze();
+        } else if (matchKey(event, kb.patrolKey)) {
+            event.preventDefault();
+            if (!event.repeat) togglePatrol();
+        } else if (matchKey(event, kb.trickKey)) {
+            event.preventDefault();
+            if (!event.repeat) triggerTricksplit();
+        }
+    }
+
+    function onMouseMove(event) {
+        botConfig.cords._rawX = event.clientX;
+        botConfig.cords._rawY = event.clientY;
+        try {
+            if (window.__scarzBots && window.__scarzBots.setMouse) window.__scarzBots.setMouse(event.clientX, event.clientY);
+        } catch (e) {}
+    }
+
+    let boundListeners = [];
+
+    function attachGlobalListeners() {
+        boundListeners.forEach(([target, type, fn, opts]) => {
+            try { target.removeEventListener(type, fn, opts); } catch (e) {}
+        });
+        boundListeners = [];
+        const add = (target, type, fn, opts) => {
+            target.addEventListener(type, fn, opts);
+            boundListeners.push([target, type, fn, opts]);
+        };
+        add(window, "keydown", onKeyDown, true);
+        add(window, "mousemove", onMouseMove, true);
+    }
+
+    function hookWebSocket() {
+        const blocked = ["delt.io", "ixagar", "glitch", "socket.io", "firebase", "agartool.io", "herokuapp", "localhost"];
+        const isBlocked = (url) => blocked.some((d) => url.includes(d));
+        const proto = WebSocket.prototype;
+        const original = proto.send;
+        proto.send = function () {
+            if (!this.__scarz) {
+                try {
+                    const url = this.url;
+                    if (url && !isBlocked(url) && /agar/i.test(url)) botConfig.agarServer = url;
+                } catch (e) {}
+            }
+            return original.apply(this, arguments);
+        };
+    }
+
+    function ensureUI() {
+        if (document.readyState === "loading" || !document.documentElement || !document.body) return;
+        if (!window.__scarzBots) injectDeltaScript();
+        if (uiHost && uiHost.isConnected) return;
+        buildUI();
+        attachGlobalListeners();
+        render();
+    }
+
+    let ensureScheduled = false;
+    function scheduleEnsure() {
+        if (ensureScheduled) return;
+        ensureScheduled = true;
+        setTimeout(() => { ensureScheduled = false; ensureUI(); }, 120);
+    }
+
+    window._gxStart = startBots;
+    window._gxAI = toggleAI;
+    window._gxVS = toggleVShield;
+    window._gxCfg = toggleSettings;
+
+    if (/agar\.io/.test(location.hostname) || /delt\.io/.test(location.hostname)) {
+        loadKeybinds();
+        hookWebSocket();
+        setInterval(updateMouseWorld, 33);
+        setInterval(render, 250);
+        setInterval(ensureUI, 1000);
+        try {
+            new MutationObserver(scheduleEnsure).observe(document, { childList: true, subtree: true });
+        } catch (e) {}
+        ensureUI();
+    }
+})();
